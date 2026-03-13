@@ -157,7 +157,7 @@ export default function Dashboard() {
                     letterSpacing: "0.12em",
                   }}
                 >
-                  {ex.slots.filter((s) => s.imageUrl).length}/{ex.slots.length}{" "}
+                  {ex.slots.filter((s) => s.imageUrl || s.modelUrl).length}/{ex.slots.length}{" "}
                   slots filled &nbsp;·&nbsp;
                   {new Date(ex.createdAt).toLocaleDateString("en-IN", {
                     day: "numeric",

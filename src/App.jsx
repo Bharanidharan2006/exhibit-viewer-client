@@ -7,6 +7,7 @@ import CustomerLogin from "./pages/customer/Login.jsx";
 import CustomerRegister from "./pages/customer/Register.jsx";
 import Exhibitions from "./pages/customer/Exhibitions.jsx";
 import Viewer from "./pages/customer/Viewer.jsx";
+import ARViewer from "./pages/customer/ARViewer.jsx";
 import Checkout from "./pages/Checkout.jsx";
 
 // Business pages
@@ -42,6 +43,7 @@ export default function App() {
 
       {/* Customer */}
       <Route path="/exhibitions" element={<Exhibitions />} />
+      <Route path="/ar/:exhibitionId/:slotName" element={<ARViewer />} />
       <Route
         path="/exhibition/:id"
         element={

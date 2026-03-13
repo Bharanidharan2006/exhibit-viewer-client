@@ -3,37 +3,53 @@ import { useParams, useNavigate } from "react-router-dom";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
 import { VRButton } from "three/examples/jsm/webxr/VRButton.js";
+import { io } from "socket.io-client";
 import api from "../../api.js";
 import GALLERY_TEMPLATES from "../../galleryTemplates.js";
+import Model3DViewer from "../../components/Model3DViewer.jsx";
+import Minimap from "../../components/Minimap.jsx";
+import { createVisitorLabel, createVisitorDot, visitorColor } from "../../components/VisitorLabel.js";
+import { useAuth } from "../../context/AuthContext.jsx";
 
 export default function Viewer() {
   const { id } = useParams();
   const navigate = useNavigate();
   const canvasRef = useRef(null);
+  const { user } = useAuth();
 
-  // Overlay state (managed in React, not DOM manipulation)
-  const [overlayData, setOverlayData] = useState(null); // null = hidden
+  const [overlayData, setOverlayData] = useState(null);
+  const [modelViewerData, setModelViewerData] = useState(null); // { modelUrl, data }
   const [liking, setLiking] = useState(false);
   const [exhibitionName, setExhibitionName] = useState("");
 
-  // Refs shared between React and Three.js loop
+  // Socket state
+  const [visitors, setVisitors] = useState([]);
+  const [visitorCount, setVisitorCount] = useState(1);
+  const [showVisitors, setShowVisitors] = useState(true);
+  const showVisitorsRef = useRef(true); // For accessing in requestAnimationFrame
+  const [playerPos, setPlayerPos] = useState({ x: 0, z: 0 });
+  const otherVisitorsMap = useRef(new Map()); // socketId -> { mesh, label, targetPos, targetRot }
+  const socketRef = useRef(null);
+  const lastBroadcastRef = useRef(0);
+
   const overlayOpenRef = useRef(false);
+  const modelViewerOpenRef = useRef(false);
   const hoveredSlotRef = useRef(null);
   const exhibitionRef = useRef(null);
 
-  // Keep overlayOpenRef in sync with React state
   useEffect(() => {
     overlayOpenRef.current = overlayData !== null;
     if (overlayData !== null) document.exitPointerLock();
   }, [overlayData]);
 
-  /* ─────────────────────────────────────────────
-     Three.js initialisation inside useEffect
-     Runs once after mount, cleans up on unmount
-  ───────────────────────────────────────────── */
   useEffect(() => {
-    let renderer, animationId;
-    const cleanupFns = []; // collect event listener removers
+    modelViewerOpenRef.current = modelViewerData !== null;
+    if (modelViewerData !== null) document.exitPointerLock();
+  }, [modelViewerData]);
+
+  useEffect(() => {
+    let renderer;
+    const cleanupFns = [];
 
     async function init() {
       // 1. Fetch exhibition data
@@ -48,7 +64,6 @@ export default function Viewer() {
         return;
       }
 
-      // 2. Find matching template for GLB path
       const template = GALLERY_TEMPLATES.find(
         (t) => t.id === exhibition.modelTemplate,
       );
@@ -71,11 +86,10 @@ export default function Viewer() {
       renderer.xr.enabled = true;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.0;
+      renderer.toneMappingExposure = 1.8; // higher = brighter overall
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-      // Append VR button
       const vrBtn = VRButton.createButton(renderer);
       document.body.appendChild(vrBtn);
       cleanupFns.push(() => vrBtn.remove());
@@ -93,15 +107,19 @@ export default function Viewer() {
       scene.add(playerRig);
       playerRig.add(camera);
 
-      let EYE_HEIGHT = 1.6;
+      const EYE_HEIGHT = 1.6;
       let PLAYER_SPEED = 2.5;
       camera.position.set(0, EYE_HEIGHT, 0);
 
       /* ── Lighting ── */
-      const hemi = new THREE.HemisphereLight(0xffeedd, 0x444433, 0.6);
-      scene.add(hemi);
+      // Strong ambient so no surface is ever fully dark
+      scene.add(new THREE.AmbientLight(0xffffff, 1.5));
 
-      const dirLight = new THREE.DirectionalLight(0xfff5e0, 1.4);
+      // Hemisphere for warm ceiling / cool floor bounce
+      scene.add(new THREE.HemisphereLight(0xffffff, 0xdddddd, 1.2));
+
+      // Main key light from above
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
       dirLight.position.set(8, 14, 6);
       dirLight.castShadow = true;
       dirLight.shadow.mapSize.set(2048, 2048);
@@ -112,34 +130,70 @@ export default function Viewer() {
       dirLight.shadow.bias = -0.001;
       scene.add(dirLight);
 
-      const fillLight = new THREE.DirectionalLight(0xd0e8ff, 0.4);
-      fillLight.position.set(-6, 8, -8);
+      // Fill from the opposite side — kills harsh shadows on walls
+      const fillLight = new THREE.DirectionalLight(0xffffff, 1.2);
+      fillLight.position.set(-8, 10, -8);
       scene.add(fillLight);
 
-      /* ── Collision & slots collections ── */
-      const colliders = [];
-      const slots = {};
+      // Front fill so walls facing the camera stay bright
+      const frontLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      frontLight.position.set(0, 6, 10);
+      scene.add(frontLight);
 
-      /* ── Floor detection ── */
+      /* ── Collections ── */
+      const colliders = [];
+      const slots = {};        // SLOT_n → artwork surfaces
+      const productSlots = {}; // SLOT_P_n → 3D product pedestals
+
+      /* ── Floor detection ──────────────────────────────────────────────────
+         THE KEY FIX: cast from INSIDE the gallery (20% above the bottom),
+         not from y=999 which hits the roof first.
+      ─────────────────────────────────────────────────────────────────────── */
       function findFloorY(meshes) {
-        const cx =
-          meshes.reduce((s, m) => {
-            const p = new THREE.Vector3();
-            m.getWorldPosition(p);
-            return s + p.x;
-          }, 0) / meshes.length;
-        const cz =
-          meshes.reduce((s, m) => {
-            const p = new THREE.Vector3();
-            m.getWorldPosition(p);
-            return s + p.z;
-          }, 0) / meshes.length;
+        // Build bounding box of all physical meshes
+        const box = new THREE.Box3();
+        meshes.forEach((m) => box.expandByObject(m));
+
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+
+        const roomHeight = box.max.y - box.min.y;
+
+        // Start the ray from 20% up from the bottom — safely inside the room
+        // so the first downward hit is the floor, not the ceiling.
+        const startY = box.min.y + roomHeight * 0.2;
+
         const ray = new THREE.Raycaster(
-          new THREE.Vector3(cx, 999, cz),
+          new THREE.Vector3(center.x, startY, center.z),
           new THREE.Vector3(0, -1, 0),
         );
+
         const hits = ray.intersectObjects(meshes, false);
-        return hits.length > 0 ? hits[0].point.y : 0;
+
+        if (hits.length > 0) {
+          console.log(
+            `✓ Floor found: Y=${hits[0].point.y.toFixed(3)} on mesh "${hits[0].object.name}"`,
+          );
+          return hits[0].point.y;
+        }
+
+        // If the ray still misses (very unusual), fall back to bounding box bottom
+        console.warn("Floor ray missed — using bounding box min Y as fallback");
+        return box.min.y;
+      }
+
+      /* ── Spawn position ───────────────────────────────────────────────────
+         Also compute the spawn XZ from the bounding box centre rather than
+         hardcoding (0, 0) which may be outside the gallery entirely.
+      ─────────────────────────────────────────────────────────────────────── */
+      function computeSpawnXZ(meshes) {
+        const box = new THREE.Box3();
+        meshes.forEach((m) => box.expandByObject(m));
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        // Spawn near the front of the gallery (85% toward the +Z wall)
+        const spawnZ = center.z + (box.max.z - center.z) * 0.6;
+        return { x: center.x, z: spawnZ };
       }
 
       /* ── Load GLB ── */
@@ -154,7 +208,20 @@ export default function Viewer() {
           child.castShadow = true;
           child.receiveShadow = true;
 
-          if (child.name.startsWith("SLOT_")) {
+          if (child.name.startsWith("SLOT_P_")) {
+            // 3D product pedestal slot — transparent so the product shows through
+            // but still raycastable for interaction
+            productSlots[child.name] = child;
+            child.material = new THREE.MeshStandardMaterial({
+              color: 0x000000,
+              transparent: true,
+              opacity: 0,
+              depthWrite: false,
+            });
+            child.userData.interactive = true;
+            child.userData.slotName = child.name;
+            child.userData.isProductSlot = true;
+          } else if (child.name.startsWith("SLOT_")) {
             slots[child.name] = child;
             child.material = new THREE.MeshStandardMaterial({
               color: 0xffffff,
@@ -170,33 +237,58 @@ export default function Viewer() {
 
         scene.add(gltf.scene);
 
-        // Place player
         if (allMeshes.length > 0) {
           const floorY = findFloorY(allMeshes);
-          playerRig.position.set(0, floorY, 0);
+          const { x: spawnX, z: spawnZ } = computeSpawnXZ(allMeshes);
+
+          playerRig.position.set(spawnX, floorY, spawnZ);
           camera.position.set(0, EYE_HEIGHT, 0);
-          // Scale speed to scene
+
+          console.log(
+            `✓ Player spawned at (${spawnX.toFixed(2)}, ${floorY.toFixed(2)}, ${spawnZ.toFixed(2)})`,
+          );
+
+          // Scale speed to gallery size
           const box = new THREE.Box3().setFromObject(gltf.scene);
           const size = new THREE.Vector3();
           box.getSize(size);
           PLAYER_SPEED = Math.max(1.2, Math.min(size.x * 0.065, 4.0));
         }
 
-        // Load artwork into slots from exhibition data
+        // Load artwork into image slots
         exhibition.slots.forEach((slotData) => {
+          // Handle image slots (SLOT_n)
           const mesh = slots[slotData.slotName];
-          if (!mesh || !slotData.imageUrl) return;
+          if (mesh && slotData.imageUrl) {
+            textureLoader.load(slotData.imageUrl, (texture) => {
+              texture.colorSpace = THREE.SRGBColorSpace;
+              texture.flipY = template.flipY ?? false;
+              mesh.material = mesh.material.clone();
+              mesh.material.map = texture;
+              mesh.material.needsUpdate = true;
+              mesh.userData.artData = {
+                slotName: slotData.slotName,
+                slotType: slotData.slotType || "image",
+                title: slotData.title,
+                artist: slotData.artist,
+                description: slotData.description,
+                price: slotData.price,
+                medium: slotData.medium,
+                dimensions: slotData.dimensions,
+                year: slotData.year,
+                likes: slotData.likes,
+              };
+            });
+          }
 
-          textureLoader.load(slotData.imageUrl, (texture) => {
-            texture.colorSpace = THREE.SRGBColorSpace;
-            texture.flipY = false;
-            mesh.material = mesh.material.clone();
-            mesh.material.map = texture;
-            mesh.material.needsUpdate = true;
-
-            // Attach full slot data to mesh for overlay
-            mesh.userData.artData = {
+          // Handle product slots (SLOT_P_n)
+          const productMesh = productSlots[slotData.slotName];
+          if (productMesh) {
+            // Store product data for interaction
+            productMesh.userData.artData = {
               slotName: slotData.slotName,
+              slotType: "model3d",
+              modelUrl: slotData.modelUrl,
               title: slotData.title,
               artist: slotData.artist,
               description: slotData.description,
@@ -206,7 +298,66 @@ export default function Viewer() {
               year: slotData.year,
               likes: slotData.likes,
             };
-          });
+
+            // Load the 3D product model inline at the pedestal position
+            if (slotData.modelUrl) {
+              const productLoader = new GLTFLoader();
+              productLoader.load(slotData.modelUrl, (productGltf) => {
+                const productModel = productGltf.scene;
+
+                // Get pedestal bounding box to position and scale the product
+                productMesh.updateMatrixWorld(true);
+                const pedestalBox = new THREE.Box3().setFromObject(productMesh);
+                const pedestalCenter = new THREE.Vector3();
+                pedestalBox.getCenter(pedestalCenter);
+                const pedestalSize = new THREE.Vector3();
+                pedestalBox.getSize(pedestalSize);
+
+                // Scale product to fit within pedestal bounds
+                const productBox = new THREE.Box3().setFromObject(productModel);
+                const productSize = new THREE.Vector3();
+                productBox.getSize(productSize);
+                const maxProductDim = Math.max(productSize.x, productSize.y, productSize.z);
+                const maxPedestalDim = Math.max(pedestalSize.x, pedestalSize.z) * 0.8;
+                const scale = maxPedestalDim / maxProductDim;
+                productModel.scale.setScalar(scale);
+
+                // Re-compute bounding box after scaling
+                productBox.setFromObject(productModel);
+                const productCenter = new THREE.Vector3();
+                productBox.getCenter(productCenter);
+
+                productModel.traverse((child) => {
+                  if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                  }
+                });
+
+                // Rotation group centered at the pedestal cube's center
+                // Product is centered inside the cube, not sitting on top
+                const rotationGroup = new THREE.Group();
+                rotationGroup.position.set(
+                  pedestalCenter.x,
+                  pedestalCenter.y,
+                  pedestalCenter.z,
+                );
+
+                // Center product relative to group (at pedestal origin)
+                productModel.position.set(
+                  -productCenter.x,
+                  -productCenter.y,
+                  -productCenter.z,
+                );
+
+                rotationGroup.add(productModel);
+                scene.add(rotationGroup);
+
+                // Store reference for rotation animation
+                productMesh.userData.rotationGroup = rotationGroup;
+              });
+            }
+          }
         });
       });
 
@@ -217,17 +368,25 @@ export default function Viewer() {
 
       function updateCrosshair() {
         if (!pointerLocked) return;
-
         centerRay.setFromCamera(CENTER, camera);
-        const meshList = Object.values(slots).filter((m) => m.userData.artData);
-        const hits = centerRay.intersectObjects(meshList);
 
+        // Check both art slots and product slots
+        const artMeshList = Object.values(slots).filter((m) => m.userData.artData);
+        const productMeshList = Object.values(productSlots).filter((m) => m.userData.artData);
+        const allInteractive = [...artMeshList, ...productMeshList];
+
+        const hits = centerRay.intersectObjects(allInteractive);
         const crosshair = document.getElementById("vr-crosshair");
         const hint = document.getElementById("vr-hint");
+        const hintText = document.getElementById("vr-hint-text");
 
         if (hits.length > 0 && hits[0].distance < 8) {
           hoveredSlotRef.current = hits[0].object;
+          const isProduct = hits[0].object.userData.isProductSlot;
           if (crosshair) crosshair.classList.add("on-art");
+          if (hintText) {
+            hintText.textContent = isProduct ? "View 3D product" : "Inspect artwork";
+          }
           if (hint && !showingHint) {
             hint.style.display = "flex";
             showingHint = true;
@@ -246,7 +405,7 @@ export default function Viewer() {
       let pointerLocked = false;
 
       const onCanvasClick = () => {
-        if (!renderer.xr.isPresenting && !overlayOpenRef.current) {
+        if (!renderer.xr.isPresenting && !overlayOpenRef.current && !modelViewerOpenRef.current) {
           canvasRef.current.requestPointerLock();
         }
       };
@@ -284,7 +443,7 @@ export default function Viewer() {
       /* ── Keyboard ── */
       const keys = { w: false, a: false, s: false, d: false };
       const onKeyDown = (e) => {
-        if (overlayOpenRef.current && e.code !== "Escape") return;
+        if ((overlayOpenRef.current || modelViewerOpenRef.current) && e.code !== "Escape") return;
         switch (e.code) {
           case "KeyW":
             keys.w = true;
@@ -300,11 +459,22 @@ export default function Viewer() {
             break;
           case "KeyE":
             if (hoveredSlotRef.current?.userData?.artData) {
-              setOverlayData({ ...hoveredSlotRef.current.userData.artData });
+              const artData = hoveredSlotRef.current.userData.artData;
+              if (artData.slotType === "model3d" && artData.modelUrl) {
+                // Open 3D product viewer
+                setModelViewerData({
+                  modelUrl: artData.modelUrl,
+                  data: { ...artData },
+                });
+              } else {
+                // Open art overlay
+                setOverlayData({ ...artData });
+              }
             }
             break;
           case "Escape":
             setOverlayData(null);
+            setModelViewerData(null);
             break;
         }
       };
@@ -331,7 +501,7 @@ export default function Viewer() {
         document.removeEventListener("keyup", onKeyUp);
       });
 
-      /* ── Collision raycaster ── */
+      /* ── Collision & floor stick ── */
       const collisionRay = new THREE.Raycaster();
       const floorRay = new THREE.Raycaster();
 
@@ -390,7 +560,7 @@ export default function Viewer() {
         if (!renderer.xr.isPresenting) {
           updateCrosshair();
 
-          if (!overlayOpenRef.current) {
+          if (!overlayOpenRef.current && !modelViewerOpenRef.current) {
             direction.z = Number(keys.s) - Number(keys.w);
             direction.x = Number(keys.d) - Number(keys.a);
             direction.normalize();
@@ -427,6 +597,52 @@ export default function Viewer() {
           }
         }
 
+        // Rotate product models slowly
+        Object.values(productSlots).forEach((mesh) => {
+          if (mesh.userData.rotationGroup) {
+            mesh.userData.rotationGroup.rotation.y += delta * 0.3;
+          }
+        });
+
+        /* ── Live Visitor Presence Loop ── */
+        if (socketRef.current && socketRef.current.connected) {
+          const now = Date.now();
+          // Broadcast local position at 10Hz to save bandwidth
+          if (now - lastBroadcastRef.current > 100) {
+            socketRef.current.emit("position-update", {
+              position: {
+                x: playerRig.position.x,
+                y: playerRig.position.y,
+                z: playerRig.position.z,
+              },
+              rotation: camera.rotation.y + playerRig.rotation.y,
+            });
+            lastBroadcastRef.current = now;
+            setPlayerPos({ x: playerRig.position.x, z: playerRig.position.z });
+          }
+
+          // Lerp other visitors and enforce culling
+          const visitorsArr = Array.from(otherVisitorsMap.current.values());
+
+          // Sort by distance (closest first)
+          visitorsArr.sort((a, b) => {
+            const distA = playerRig.position.distanceToSquared(a.targetPos);
+            const distB = playerRig.position.distanceToSquared(b.targetPos);
+            return distA - distB;
+          });
+
+          visitorsArr.forEach((v, idx) => {
+            // Cull: Only show nearest 20 visitors and respect toggle
+            if (idx < 20 && showVisitorsRef.current) {
+              if (!v.mesh.parent) scene.add(v.mesh);
+              // Smoothly interpolate position for 10hz updates -> 60fps render
+              v.mesh.position.lerp(v.targetPos, 0.15);
+            } else {
+              if (v.mesh.parent) v.mesh.parent.remove(v.mesh);
+            }
+          });
+        }
+
         renderer.render(scene, camera);
       }
 
@@ -444,29 +660,119 @@ export default function Viewer() {
 
     init();
 
-    // Cleanup on unmount
+    /* ── Socket.io Connection & Events ── */
+    // Use VITE_API_URL or fallback to localhost:5000 in dev
+    const SOCKET_URL = import.meta.env.VITE_API_URL
+      ? import.meta.env.VITE_API_URL.replace("/api", "")
+      : "http://localhost:5000";
+
+    const socket = io(SOCKET_URL, { withCredentials: true });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("join-exhibition", {
+        exhibitionId: id,
+        userId: user?._id || socket.id,
+        name: user?.name || "Anonymous",
+      });
+    });
+
+    socket.on("visitor-count", (count) => {
+      setVisitorCount(count);
+    });
+
+    socket.on("current-visitors", (currentVisitors) => {
+      currentVisitors.forEach((v) => addVisitor(v));
+      updateVisitorsState();
+    });
+
+    socket.on("visitor-joined", (visitor) => {
+      addVisitor(visitor);
+      updateVisitorsState();
+    });
+
+    socket.on("visitor-left", ({ socketId }) => {
+      removeVisitor(socketId);
+      updateVisitorsState();
+    });
+
+    socket.on("visitor-moved", ({ socketId, position, rotation }) => {
+      const v = otherVisitorsMap.current.get(socketId);
+      if (v) {
+        v.targetPos.copy(position);
+        v.targetRot = rotation;
+      }
+    });
+
+    function addVisitor(v) {
+      if (otherVisitorsMap.current.has(v.socketId)) return;
+      
+      const vcol = visitorColor(v.userId || v.socketId);
+      const mesh = createVisitorDot(vcol);
+      const label = createVisitorLabel(v.name, vcol);
+      
+      mesh.position.copy(v.position);
+      // Place label about 1.8m high relative to dot
+      label.position.set(0, 1.8, 0); 
+      mesh.add(label);
+      
+      // Store in map but don't add to scene yet (will be managed by distance sorting in render loop)
+      otherVisitorsMap.current.set(v.socketId, {
+        ...v,
+        mesh,
+        label,
+        targetPos: new THREE.Vector3().copy(v.position),
+        targetRot: v.rotation,
+      });
+    }
+
+    function removeVisitor(socketId) {
+      const v = otherVisitorsMap.current.get(socketId);
+      if (v) {
+        if (v.mesh.parent) v.mesh.parent.remove(v.mesh);
+        otherVisitorsMap.current.delete(socketId);
+      }
+    }
+
+    function updateVisitorsState() {
+      // Create a plain array for the React minimap state
+      setVisitors(Array.from(otherVisitorsMap.current.values()).map(v => ({
+        socketId: v.socketId,
+        name: v.name,
+        position: v.targetPos,
+      })));
+    }
+
     return () => {
       if (renderer) {
         renderer.setAnimationLoop(null);
         renderer.dispose();
       }
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
       document.exitPointerLock();
       cleanupFns.forEach((fn) => fn());
     };
-  }, [id]); // re-init if exhibition id changes
+  }, [id]);
 
-  /* ─────────────────────────────────────────────
-     Like handler — calls backend
-  ───────────────────────────────────────────── */
   const handleLike = useCallback(async () => {
-    if (!overlayData || liking) return;
+    const currentData = overlayData || modelViewerData?.data;
+    if (!currentData || liking) return;
     setLiking(true);
     try {
       const { data } = await api.post(
-        `/exhibitions/${id}/slots/${overlayData.slotName}/like`,
+        `/exhibitions/${id}/slots/${currentData.slotName}/like`,
       );
-      // Update overlay + the mesh's userData so it stays correct if re-opened
-      setOverlayData((prev) => ({ ...prev, likes: data.likes }));
+      if (overlayData) {
+        setOverlayData((prev) => ({ ...prev, likes: data.likes }));
+      }
+      if (modelViewerData) {
+        setModelViewerData((prev) => ({
+          ...prev,
+          data: { ...prev.data, likes: data.likes },
+        }));
+      }
       if (hoveredSlotRef.current?.userData?.artData) {
         hoveredSlotRef.current.userData.artData.likes = data.likes;
       }
@@ -475,20 +781,18 @@ export default function Viewer() {
     } finally {
       setLiking(false);
     }
-  }, [overlayData, id, liking]);
+  }, [overlayData, modelViewerData, id, liking]);
 
-  /* ─────────────────────────────────────────────
-     Buy handler
-  ───────────────────────────────────────────── */
   const handleBuy = useCallback(() => {
-    if (!overlayData) return;
+    const currentData = overlayData || modelViewerData?.data;
+    if (!currentData) return;
     const params = new URLSearchParams({
-      title: overlayData.title || "",
-      artist: overlayData.artist || "",
-      price: overlayData.price || 0,
+      title: currentData.title || "",
+      artist: currentData.artist || "",
+      price: currentData.price || 0,
     });
     navigate(`/checkout?${params.toString()}`);
-  }, [overlayData, navigate]);
+  }, [overlayData, modelViewerData, navigate]);
 
   return (
     <div
@@ -499,7 +803,6 @@ export default function Viewer() {
         position: "relative",
       }}
     >
-      {/* Three.js canvas */}
       <canvas
         ref={canvasRef}
         style={{ display: "block", width: "100%", height: "100%" }}
@@ -562,6 +865,7 @@ export default function Viewer() {
         }}
       >
         <div
+          className="ch-ring"
           style={{
             width: 22,
             height: 22,
@@ -573,7 +877,6 @@ export default function Viewer() {
             transform: "translate(-50%,-50%)",
             transition: "transform 0.15s, border-color 0.15s",
           }}
-          className="ch-ring"
         />
         <div
           style={{
@@ -624,6 +927,7 @@ export default function Viewer() {
           E
         </span>
         <span
+          id="vr-hint-text"
           style={{
             color: "rgba(255,255,255,0.75)",
             textTransform: "uppercase",
@@ -644,7 +948,7 @@ export default function Viewer() {
           backdropFilter: "blur(12px)",
           border: "1px solid rgba(196,162,101,0.3)",
           padding: "1.2rem 1.5rem",
-          opacity: overlayData ? 0 : 1,
+          opacity: (overlayData || modelViewerData) ? 0 : 1,
           transition: "opacity 0.3s",
           pointerEvents: "none",
         }}
@@ -715,7 +1019,6 @@ export default function Viewer() {
         </div>
       </div>
 
-      {/* Art Overlay — React-managed */}
       {overlayData && (
         <ArtOverlay
           data={overlayData}
@@ -725,13 +1028,36 @@ export default function Viewer() {
           liking={liking}
         />
       )}
+
+      {modelViewerData && (
+        <Model3DViewer
+          modelUrl={modelViewerData.modelUrl}
+          data={modelViewerData.data}
+          exhibitionId={id}
+          onClose={() => setModelViewerData(null)}
+          onLike={handleLike}
+          onBuy={handleBuy}
+          liking={liking}
+        />
+      )}
+
+      {/* Live Visitors Minimap */}
+      <Minimap
+        visitors={visitors}
+        playerPos={playerPos}
+        visitorCount={visitorCount}
+        visible={showVisitors}
+        onToggle={() => {
+          setShowVisitors((prev) => {
+            showVisitorsRef.current = !prev;
+            return !prev;
+          });
+        }}
+      />
     </div>
   );
 }
 
-/* ─────────────────────────────────────────────
-   Art Overlay Component
-───────────────────────────────────────────── */
 function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
   return (
     <div
@@ -744,7 +1070,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
         alignItems: "center",
       }}
     >
-      {/* Backdrop */}
       <div
         onClick={onClose}
         style={{
@@ -755,8 +1080,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
           animation: "fadeIn 0.3s ease",
         }}
       />
-
-      {/* Panel */}
       <div
         style={{
           position: "relative",
@@ -803,14 +1126,13 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
               cursor: "pointer",
               color: "#8a7f72",
               fontSize: "0.8rem",
-              transition: "border-color 0.2s",
             }}
           >
             ✕
           </button>
         </div>
 
-        {/* Image placeholder */}
+        {/* Image area */}
         <div
           style={{
             width: "100%",
@@ -929,7 +1251,7 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
               ["Medium", data.medium],
               ["Dimensions", data.dimensions],
               ["Edition", "Original"],
-            ].map(([label, val]) => (
+            ].map(([label, val], i) => (
               <div
                 key={label}
                 style={{
@@ -938,8 +1260,8 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
                   display: "flex",
                   flexDirection: "column",
                   gap: "0.3rem",
-                  borderRight: "1px solid rgba(26,21,16,0.08)",
-                  paddingLeft: label !== "Medium" ? "1rem" : 0,
+                  borderRight: i < 2 ? "1px solid rgba(26,21,16,0.08)" : "none",
+                  paddingLeft: i > 0 ? "1rem" : 0,
                 }}
               >
                 <span
@@ -1003,7 +1325,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
                 {data.price?.toLocaleString("en-IN") || 0}
               </span>
             </div>
-
             <button
               onClick={onLike}
               disabled={liking}
@@ -1019,7 +1340,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
                 fontSize: "0.65rem",
                 letterSpacing: "0.1em",
                 color: "#8a7f72",
-                transition: "all 0.2s",
                 opacity: liking ? 0.6 : 1,
               }}
             >
@@ -1033,6 +1353,12 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
           >
             <button
               onClick={onBuy}
+              onMouseEnter={(e) =>
+                (e.currentTarget.style.background = "#9a7a45")
+              }
+              onMouseLeave={(e) =>
+                (e.currentTarget.style.background = "#1a1510")
+              }
               style={{
                 flex: 1,
                 display: "flex",
@@ -1049,12 +1375,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
                 cursor: "pointer",
                 transition: "background 0.3s",
               }}
-              onMouseEnter={(e) =>
-                (e.currentTarget.style.background = "#9a7a45")
-              }
-              onMouseLeave={(e) =>
-                (e.currentTarget.style.background = "#1a1510")
-              }
             >
               Acquire This Work →
             </button>
@@ -1093,9 +1413,9 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
       </div>
 
       <style>{`
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes panelIn { from { opacity: 0; transform: translateY(24px) scale(0.97); } to { opacity: 1; transform: translateY(0) scale(1); } }
-        #vr-crosshair.on-art .ch-ring { transform: translate(-50%,-50%) scale(1.5) !important; border-color: #c4a265 !important; }
+        @keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
+        @keyframes panelIn { from { opacity:0; transform:translateY(24px) scale(0.97) } to { opacity:1; transform:translateY(0) scale(1) } }
+        #vr-crosshair.on-art .ch-ring { transform:translate(-50%,-50%) scale(1.5) !important; border-color:#c4a265 !important; }
       `}</style>
     </div>
   );

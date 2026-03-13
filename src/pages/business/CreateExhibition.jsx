@@ -29,6 +29,7 @@ export default function CreateExhibition() {
         description: basicInfo.description,
         modelTemplate: selectedTemplate.id,
         slotCount: selectedTemplate.slotCount,
+        productSlotCount: selectedTemplate.productSlotCount || 0,
       });
       setExhibition(data);
       setSlots(data.slots);
@@ -39,11 +40,13 @@ export default function CreateExhibition() {
   };
 
   /* ── Step 1: upload image + metadata per slot ── */
-  const handleSlotUpload = async (slotName, file, meta) => {
+  const handleSlotUpload = async (slotName, file, meta, isModel = false) => {
     setUploading((u) => ({ ...u, [slotName]: true }));
     try {
       const fd = new FormData();
-      if (file) fd.append("image", file);
+      if (file) {
+        fd.append(isModel ? "model" : "image", file);
+      }
       Object.entries(meta).forEach(([k, v]) => fd.append(k, v));
 
       const { data } = await api.post(
@@ -229,8 +232,8 @@ export default function CreateExhibition() {
                   key={slot.slotName}
                   slot={slot}
                   loading={uploading[slot.slotName]}
-                  onSave={(file, meta) =>
-                    handleSlotUpload(slot.slotName, file, meta)
+                  onSave={(file, meta, isModel) =>
+                    handleSlotUpload(slot.slotName, file, meta, isModel)
                   }
                 />
               ))}
@@ -282,7 +285,7 @@ export default function CreateExhibition() {
                 marginBottom: "2.5rem",
               }}
             >
-              {slots.filter((s) => s.imageUrl).length} of {slots.length} slots
+              {slots.filter((s) => s.imageUrl || s.modelUrl).length} of {slots.length} slots
               filled
             </p>
 
@@ -421,7 +424,8 @@ function TemplateCard({ template, selected, onSelect }) {
             color: "var(--muted)",
           }}
         >
-          {template.slotCount} slots
+          {template.slotCount} art slots
+          {template.productSlotCount > 0 && ` · ${template.productSlotCount} product slots`}
         </span>
         <span
           style={{
@@ -439,9 +443,13 @@ function TemplateCard({ template, selected, onSelect }) {
 
 /* ── Individual slot editor ── */
 function SlotEditor({ slot, onSave, loading }) {
+  const isProductSlot = slot.slotName.startsWith("SLOT_P_");
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(
     slot.imageUrl ? `${slot.imageUrl}` : null,
+  );
+  const [modelFileName, setModelFileName] = useState(
+    slot.modelUrl ? slot.modelUrl.split("/").pop() : null,
   );
   const [meta, setMeta] = useState({
     title: slot.title || "",
@@ -458,40 +466,95 @@ function SlotEditor({ slot, onSave, loading }) {
     const f = e.target.files[0];
     if (!f) return;
     setFile(f);
-    setPreview(URL.createObjectURL(f));
+    if (isProductSlot) {
+      setModelFileName(f.name);
+    } else {
+      setPreview(URL.createObjectURL(f));
+    }
     setSaved(false);
   };
 
   const handleSave = async () => {
-    await onSave(file, meta);
+    await onSave(file, meta, isProductSlot);
     setSaved(true);
   };
 
   return (
     <div
       style={{
-        border: "1px solid var(--border-sub)",
-        background: "rgba(255,255,255,0.4)",
+        border: `1px solid ${isProductSlot ? "rgba(196,162,101,0.35)" : "var(--border-sub)"}`,
+        background: isProductSlot
+          ? "rgba(196,162,101,0.04)"
+          : "rgba(255,255,255,0.4)",
         padding: "1.5rem",
       }}
     >
       <div style={{ display: "flex", gap: "1.5rem", alignItems: "flex-start" }}>
-        {/* Image upload area */}
+        {/* Upload area */}
         <label
           style={{
             width: 140,
             height: 140,
             flexShrink: 0,
-            border: `2px dashed ${preview ? "var(--gold)" : "var(--border-sub)"}`,
+            border: `2px dashed ${(preview || modelFileName) ? "var(--gold)" : "var(--border-sub)"}`,
             display: "grid",
             placeItems: "center",
             cursor: "pointer",
             position: "relative",
             overflow: "hidden",
-            background: preview ? "transparent" : "rgba(0,0,0,0.02)",
+            background: (preview || modelFileName) ? "transparent" : "rgba(0,0,0,0.02)",
           }}
         >
-          {preview ? (
+          {isProductSlot ? (
+            modelFileName ? (
+              <div style={{ textAlign: "center", padding: "0.8rem" }}>
+                <div
+                  style={{
+                    fontSize: "2rem",
+                    marginBottom: "0.4rem",
+                    color: "var(--gold)",
+                  }}
+                >
+                  ⬣
+                </div>
+                <div
+                  style={{
+                    fontFamily: "'DM Mono', monospace",
+                    fontSize: "0.5rem",
+                    color: "var(--gold-deep)",
+                    letterSpacing: "0.1em",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {modelFileName}
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", padding: "1rem" }}>
+                <div
+                  style={{
+                    fontSize: "1.5rem",
+                    color: "var(--gold)",
+                    marginBottom: "0.3rem",
+                  }}
+                >
+                  ⬣
+                </div>
+                <div
+                  style={{
+                    fontFamily: "'DM Mono', monospace",
+                    fontSize: "0.55rem",
+                    color: "var(--muted)",
+                    letterSpacing: "0.1em",
+                  }}
+                >
+                  Upload
+                  <br />
+                  3D Model
+                </div>
+              </div>
+            )
+          ) : preview ? (
             <img
               src={preview}
               alt="preview"
@@ -524,7 +587,7 @@ function SlotEditor({ slot, onSave, loading }) {
           )}
           <input
             type="file"
-            accept="image/*"
+            accept={isProductSlot ? ".glb,.gltf" : "image/*"}
             style={{ display: "none" }}
             onChange={handleFile}
           />
@@ -540,11 +603,28 @@ function SlotEditor({ slot, onSave, loading }) {
               color: "var(--gold)",
               marginBottom: "1rem",
               textTransform: "uppercase",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.75rem",
             }}
           >
             {slot.slotName}{" "}
+            {isProductSlot && (
+              <span
+                style={{
+                  fontSize: "0.5rem",
+                  letterSpacing: "0.15em",
+                  background: "var(--gold)",
+                  color: "white",
+                  padding: "0.15rem 0.5rem",
+                  borderRadius: 2,
+                }}
+              >
+                3D PRODUCT
+              </span>
+            )}
             {saved && (
-              <span style={{ color: "var(--success)", marginLeft: "1rem" }}>
+              <span style={{ color: "var(--success)", marginLeft: "0.5rem" }}>
                 ✓ Saved
               </span>
             )}
@@ -558,19 +638,19 @@ function SlotEditor({ slot, onSave, loading }) {
             }}
           >
             {[
-              { label: "Title", key: "title", placeholder: "Artwork title" },
-              { label: "Artist", key: "artist", placeholder: "Artist name" },
+              { label: "Title", key: "title", placeholder: isProductSlot ? "Product name" : "Artwork title" },
+              { label: isProductSlot ? "Brand / Maker" : "Artist", key: "artist", placeholder: isProductSlot ? "Brand or maker" : "Artist name" },
               {
                 label: "Price (₹)",
                 key: "price",
                 placeholder: "7500",
                 type: "number",
               },
-              { label: "Medium", key: "medium", placeholder: "Oil on canvas" },
+              { label: isProductSlot ? "Material" : "Medium", key: "medium", placeholder: isProductSlot ? "Ceramic, wood, etc." : "Oil on canvas" },
               {
                 label: "Dimensions",
                 key: "dimensions",
-                placeholder: "60 × 90 cm",
+                placeholder: isProductSlot ? "15 × 10 × 8 cm" : "60 × 90 cm",
               },
               {
                 label: "Year",
@@ -596,7 +676,7 @@ function SlotEditor({ slot, onSave, loading }) {
               <label>Description</label>
               <input
                 type="text"
-                placeholder="Short description of the artwork"
+                placeholder={isProductSlot ? "Describe this product" : "Short description of the artwork"}
                 value={meta.description}
                 onChange={(e) => {
                   setMeta({ ...meta, description: e.target.value });
@@ -631,3 +711,4 @@ function SlotEditor({ slot, onSave, loading }) {
     </div>
   );
 }
+

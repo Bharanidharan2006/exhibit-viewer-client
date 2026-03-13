@@ -272,7 +272,7 @@ function ExhibitionCard({ exhibition, onEnter }) {
               color: "var(--muted)",
             }}
           >
-            {exhibition.slots?.filter((s) => s.imageUrl).length || 0} works
+            {exhibition.slots?.filter((s) => s.imageUrl || s.modelUrl).length || 0} works
           </span>
 
           <button
