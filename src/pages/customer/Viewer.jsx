@@ -7,8 +7,13 @@ import { io } from "socket.io-client";
 import api from "../../api.js";
 import GALLERY_TEMPLATES from "../../galleryTemplates.js";
 import Model3DViewer from "../../components/Model3DViewer.jsx";
+import ShopkeeperChat from "../../components/ShopkeeperChat.jsx";
 import Minimap from "../../components/Minimap.jsx";
-import { createVisitorLabel, createVisitorDot, visitorColor } from "../../components/VisitorLabel.js";
+import {
+  createVisitorLabel,
+  createVisitorDot,
+  visitorColor,
+} from "../../components/VisitorLabel.js";
 import { useAuth } from "../../context/AuthContext.jsx";
 
 export default function Viewer() {
@@ -18,17 +23,21 @@ export default function Viewer() {
   const { user } = useAuth();
 
   const [overlayData, setOverlayData] = useState(null);
-  const [modelViewerData, setModelViewerData] = useState(null); // { modelUrl, data }
+  const [modelViewerData, setModelViewerData] = useState(null);
   const [liking, setLiking] = useState(false);
   const [exhibitionName, setExhibitionName] = useState("");
+  const [shopkeeperNearby, setShopkeeperNearby] = useState(false);
+  const [shopkeeperDismissed, setShopkeeperDismissed] = useState(false);
+  const shopkeeperDismissedRef = useRef(false);
+  const shopkeeperChatOpenRef = useRef(false);
 
   // Socket state
   const [visitors, setVisitors] = useState([]);
   const [visitorCount, setVisitorCount] = useState(1);
   const [showVisitors, setShowVisitors] = useState(true);
-  const showVisitorsRef = useRef(true); // For accessing in requestAnimationFrame
+  const showVisitorsRef = useRef(true);
   const [playerPos, setPlayerPos] = useState({ x: 0, z: 0 });
-  const otherVisitorsMap = useRef(new Map()); // socketId -> { mesh, label, targetPos, targetRot }
+  const otherVisitorsMap = useRef(new Map());
   const socketRef = useRef(null);
   const lastBroadcastRef = useRef(0);
 
@@ -47,12 +56,25 @@ export default function Viewer() {
     if (modelViewerData !== null) document.exitPointerLock();
   }, [modelViewerData]);
 
+  // Sync shopkeeper chat ref — but we also set it directly in handlers
+  // for immediate effect before React re-renders
+  useEffect(() => {
+    const isOpen = shopkeeperNearby && !shopkeeperDismissed;
+    shopkeeperChatOpenRef.current = isOpen;
+    if (isOpen) document.exitPointerLock();
+  }, [shopkeeperNearby, shopkeeperDismissed]);
+
+  useEffect(() => {
+    return () => {
+      window.__shopkeeperModel = null;
+    };
+  }, []);
+
   useEffect(() => {
     let renderer;
     const cleanupFns = [];
 
     async function init() {
-      // 1. Fetch exhibition data
       let exhibition;
       try {
         const { data } = await api.get(`/exhibitions/${id}`);
@@ -72,6 +94,8 @@ export default function Viewer() {
         return;
       }
 
+      window.__playerRig = null;
+
       /* ── Scene ── */
       const scene = new THREE.Scene();
       scene.background = new THREE.Color(0xf2f2f2);
@@ -86,7 +110,7 @@ export default function Viewer() {
       renderer.xr.enabled = true;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
-      renderer.toneMappingExposure = 1.8; // higher = brighter overall
+      renderer.toneMappingExposure = 1.8;
       renderer.shadowMap.enabled = true;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -112,14 +136,10 @@ export default function Viewer() {
       camera.position.set(0, EYE_HEIGHT, 0);
 
       /* ── Lighting ── */
-      // Strong ambient so no surface is ever fully dark
-      scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+      scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+      scene.add(new THREE.HemisphereLight(0xffffff, 0xdddddd, 1));
 
-      // Hemisphere for warm ceiling / cool floor bounce
-      scene.add(new THREE.HemisphereLight(0xffffff, 0xdddddd, 1.2));
-
-      // Main key light from above
-      const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1);
       dirLight.position.set(8, 14, 6);
       dirLight.castShadow = true;
       dirLight.shadow.mapSize.set(2048, 2048);
@@ -130,68 +150,49 @@ export default function Viewer() {
       dirLight.shadow.bias = -0.001;
       scene.add(dirLight);
 
-      // Fill from the opposite side — kills harsh shadows on walls
       const fillLight = new THREE.DirectionalLight(0xffffff, 1.2);
       fillLight.position.set(-8, 10, -8);
       scene.add(fillLight);
 
-      // Front fill so walls facing the camera stay bright
       const frontLight = new THREE.DirectionalLight(0xffffff, 0.8);
       frontLight.position.set(0, 6, 10);
       scene.add(frontLight);
 
       /* ── Collections ── */
       const colliders = [];
-      const slots = {};        // SLOT_n → artwork surfaces
-      const productSlots = {}; // SLOT_P_n → 3D product pedestals
+      const slots = {};
+      const productSlots = {};
+      let keeperSlot = null;
 
-      /* ── Floor detection ──────────────────────────────────────────────────
-         THE KEY FIX: cast from INSIDE the gallery (20% above the bottom),
-         not from y=999 which hits the roof first.
-      ─────────────────────────────────────────────────────────────────────── */
+      /* ── Floor detection ── */
       function findFloorY(meshes) {
-        // Build bounding box of all physical meshes
         const box = new THREE.Box3();
         meshes.forEach((m) => box.expandByObject(m));
-
         const center = new THREE.Vector3();
         box.getCenter(center);
-
         const roomHeight = box.max.y - box.min.y;
-
-        // Start the ray from 20% up from the bottom — safely inside the room
-        // so the first downward hit is the floor, not the ceiling.
         const startY = box.min.y + roomHeight * 0.2;
-
         const ray = new THREE.Raycaster(
           new THREE.Vector3(center.x, startY, center.z),
           new THREE.Vector3(0, -1, 0),
         );
-
         const hits = ray.intersectObjects(meshes, false);
-
         if (hits.length > 0) {
           console.log(
             `✓ Floor found: Y=${hits[0].point.y.toFixed(3)} on mesh "${hits[0].object.name}"`,
           );
           return hits[0].point.y;
         }
-
-        // If the ray still misses (very unusual), fall back to bounding box bottom
         console.warn("Floor ray missed — using bounding box min Y as fallback");
         return box.min.y;
       }
 
-      /* ── Spawn position ───────────────────────────────────────────────────
-         Also compute the spawn XZ from the bounding box centre rather than
-         hardcoding (0, 0) which may be outside the gallery entirely.
-      ─────────────────────────────────────────────────────────────────────── */
+      /* ── Spawn position ── */
       function computeSpawnXZ(meshes) {
         const box = new THREE.Box3();
         meshes.forEach((m) => box.expandByObject(m));
         const center = new THREE.Vector3();
         box.getCenter(center);
-        // Spawn near the front of the gallery (85% toward the +Z wall)
         const spawnZ = center.z + (box.max.z - center.z) * 0.6;
         return { x: center.x, z: spawnZ };
       }
@@ -209,8 +210,6 @@ export default function Viewer() {
           child.receiveShadow = true;
 
           if (child.name.startsWith("SLOT_P_")) {
-            // 3D product pedestal slot — transparent so the product shows through
-            // but still raycastable for interaction
             productSlots[child.name] = child;
             child.material = new THREE.MeshStandardMaterial({
               color: 0x000000,
@@ -221,6 +220,14 @@ export default function Viewer() {
             child.userData.interactive = true;
             child.userData.slotName = child.name;
             child.userData.isProductSlot = true;
+          } else if (child.name === "SLOT_KEEPER") {
+            keeperSlot = child;
+            child.material = new THREE.MeshStandardMaterial({
+              color: 0x000000,
+              transparent: true,
+              opacity: 0,
+              depthWrite: false,
+            });
           } else if (child.name.startsWith("SLOT_")) {
             slots[child.name] = child;
             child.material = new THREE.MeshStandardMaterial({
@@ -240,24 +247,19 @@ export default function Viewer() {
         if (allMeshes.length > 0) {
           const floorY = findFloorY(allMeshes);
           const { x: spawnX, z: spawnZ } = computeSpawnXZ(allMeshes);
-
           playerRig.position.set(spawnX, floorY, spawnZ);
           camera.position.set(0, EYE_HEIGHT, 0);
-
           console.log(
             `✓ Player spawned at (${spawnX.toFixed(2)}, ${floorY.toFixed(2)}, ${spawnZ.toFixed(2)})`,
           );
-
-          // Scale speed to gallery size
           const box = new THREE.Box3().setFromObject(gltf.scene);
           const size = new THREE.Vector3();
           box.getSize(size);
           PLAYER_SPEED = Math.max(1.2, Math.min(size.x * 0.065, 4.0));
         }
 
-        // Load artwork into image slots
+        // Load image slots
         exhibition.slots.forEach((slotData) => {
-          // Handle image slots (SLOT_n)
           const mesh = slots[slotData.slotName];
           if (mesh && slotData.imageUrl) {
             textureLoader.load(slotData.imageUrl, (texture) => {
@@ -281,10 +283,9 @@ export default function Viewer() {
             });
           }
 
-          // Handle product slots (SLOT_P_n)
+          // Load 3D product slots
           const productMesh = productSlots[slotData.slotName];
           if (productMesh) {
-            // Store product data for interaction
             productMesh.userData.artData = {
               slotName: slotData.slotName,
               slotType: "model3d",
@@ -299,13 +300,11 @@ export default function Viewer() {
               likes: slotData.likes,
             };
 
-            // Load the 3D product model inline at the pedestal position
             if (slotData.modelUrl) {
               const productLoader = new GLTFLoader();
               productLoader.load(slotData.modelUrl, (productGltf) => {
                 const productModel = productGltf.scene;
 
-                // Get pedestal bounding box to position and scale the product
                 productMesh.updateMatrixWorld(true);
                 const pedestalBox = new THREE.Box3().setFromObject(productMesh);
                 const pedestalCenter = new THREE.Vector3();
@@ -313,16 +312,19 @@ export default function Viewer() {
                 const pedestalSize = new THREE.Vector3();
                 pedestalBox.getSize(pedestalSize);
 
-                // Scale product to fit within pedestal bounds
                 const productBox = new THREE.Box3().setFromObject(productModel);
                 const productSize = new THREE.Vector3();
                 productBox.getSize(productSize);
-                const maxProductDim = Math.max(productSize.x, productSize.y, productSize.z);
-                const maxPedestalDim = Math.max(pedestalSize.x, pedestalSize.z) * 0.8;
+                const maxProductDim = Math.max(
+                  productSize.x,
+                  productSize.y,
+                  productSize.z,
+                );
+                const maxPedestalDim =
+                  Math.max(pedestalSize.x, pedestalSize.z) * 0.8;
                 const scale = maxPedestalDim / maxProductDim;
                 productModel.scale.setScalar(scale);
 
-                // Re-compute bounding box after scaling
                 productBox.setFromObject(productModel);
                 const productCenter = new THREE.Vector3();
                 productBox.getCenter(productCenter);
@@ -334,31 +336,77 @@ export default function Viewer() {
                   }
                 });
 
-                // Rotation group centered at the pedestal cube's center
-                // Product is centered inside the cube, not sitting on top
                 const rotationGroup = new THREE.Group();
                 rotationGroup.position.set(
                   pedestalCenter.x,
                   pedestalCenter.y,
                   pedestalCenter.z,
                 );
-
-                // Center product relative to group (at pedestal origin)
                 productModel.position.set(
                   -productCenter.x,
                   -productCenter.y,
                   -productCenter.z,
                 );
-
                 rotationGroup.add(productModel);
                 scene.add(rotationGroup);
-
-                // Store reference for rotation animation
                 productMesh.userData.rotationGroup = rotationGroup;
               });
             }
           }
         });
+
+        /* ── Load AI Shopkeeper ── */
+        if (exhibition.aiShopkeeper?.enabled && keeperSlot) {
+          keeperSlot.updateMatrixWorld(true);
+          const keeperBox = new THREE.Box3().setFromObject(keeperSlot);
+          const keeperCenter = new THREE.Vector3();
+          keeperBox.getCenter(keeperCenter);
+          const keeperFloorY = keeperBox.min.y;
+
+          const shopkeeperLoader = new GLTFLoader();
+          const shopkeeperUrl =
+            (import.meta.env.VITE_API_URL
+              ? import.meta.env.VITE_API_URL.replace("/api", "")
+              : "http://localhost:5000") + "/public/shopkeeper.glb";
+
+          shopkeeperLoader.load(
+            shopkeeperUrl,
+            (shopGltf) => {
+              const shopModel = shopGltf.scene;
+              const shopBox = new THREE.Box3().setFromObject(shopModel);
+              const shopSize = new THREE.Vector3();
+              shopBox.getSize(shopSize);
+              const shopScale = 1.7 / shopSize.y;
+              shopModel.scale.setScalar(shopScale);
+              shopBox.setFromObject(shopModel);
+              const bottomOffset = shopBox.min.y;
+              shopModel.position.set(
+                keeperCenter.x - (shopBox.min.x + shopBox.max.x) / 2,
+                keeperFloorY - bottomOffset,
+                keeperCenter.z - (shopBox.min.z + shopBox.max.z) / 2,
+              );
+              shopModel.traverse((child) => {
+                if (child.isMesh) {
+                  child.castShadow = true;
+                  child.receiveShadow = true;
+                  child.userData.interactive = true;
+                  child.userData.isShopkeeper = true;
+                }
+              });
+              scene.add(shopModel);
+              window.__shopkeeperModel = shopModel;
+              console.log(
+                `✓ Shopkeeper placed at (${keeperCenter.x.toFixed(2)}, ${keeperFloorY.toFixed(2)}, ${keeperCenter.z.toFixed(2)})`,
+              );
+            },
+            undefined,
+            (err) => console.warn("Could not load shopkeeper model:", err),
+          );
+        } else if (exhibition.aiShopkeeper?.enabled && !keeperSlot) {
+          console.warn(
+            "AI Shopkeeper enabled but no SLOT_KEEPER mesh found in gallery model",
+          );
+        }
       });
 
       /* ── Crosshair raycaster ── */
@@ -370,22 +418,36 @@ export default function Viewer() {
         if (!pointerLocked) return;
         centerRay.setFromCamera(CENTER, camera);
 
-        // Check both art slots and product slots
-        const artMeshList = Object.values(slots).filter((m) => m.userData.artData);
-        const productMeshList = Object.values(productSlots).filter((m) => m.userData.artData);
-        const allInteractive = [...artMeshList, ...productMeshList];
+        const artMeshList = Object.values(slots).filter(
+          (m) => m.userData.artData,
+        );
+        const productMeshList = Object.values(productSlots).filter(
+          (m) => m.userData.artData,
+        );
+        const interactiveMeshes = [...artMeshList, ...productMeshList];
 
-        const hits = centerRay.intersectObjects(allInteractive);
+        if (window.__shopkeeperModel) {
+          window.__shopkeeperModel.traverse((child) => {
+            if (child.isMesh && child.userData.interactive)
+              interactiveMeshes.push(child);
+          });
+        }
+
+        const hits = centerRay.intersectObjects(interactiveMeshes);
         const crosshair = document.getElementById("vr-crosshair");
         const hint = document.getElementById("vr-hint");
         const hintText = document.getElementById("vr-hint-text");
 
         if (hits.length > 0 && hits[0].distance < 8) {
-          hoveredSlotRef.current = hits[0].object;
-          const isProduct = hits[0].object.userData.isProductSlot;
+          const obj = hits[0].object;
+          hoveredSlotRef.current = obj;
           if (crosshair) crosshair.classList.add("on-art");
           if (hintText) {
-            hintText.textContent = isProduct ? "View 3D product" : "Inspect artwork";
+            if (obj.userData.isShopkeeper)
+              hintText.textContent = "Talk to Shopkeeper";
+            else if (obj.userData.isProductSlot)
+              hintText.textContent = "View 3D product";
+            else hintText.textContent = "Inspect artwork";
           }
           if (hint && !showingHint) {
             hint.style.display = "flex";
@@ -405,9 +467,36 @@ export default function Viewer() {
       let pointerLocked = false;
 
       const onCanvasClick = () => {
-        if (!renderer.xr.isPresenting && !overlayOpenRef.current && !modelViewerOpenRef.current) {
-          canvasRef.current.requestPointerLock();
+        if (
+          overlayOpenRef.current ||
+          modelViewerOpenRef.current ||
+          shopkeeperChatOpenRef.current
+        )
+          return;
+
+        if (pointerLocked && hoveredSlotRef.current) {
+          const obj = hoveredSlotRef.current;
+          if (obj.userData.isShopkeeper) {
+            // FIX: set ref immediately — don't wait for useEffect
+            shopkeeperChatOpenRef.current = true;
+            setShopkeeperNearby(true);
+            setShopkeeperDismissed(false);
+            shopkeeperDismissedRef.current = false;
+            return;
+          } else if (obj.userData.artData) {
+            const artData = obj.userData.artData;
+            if (artData.slotType === "model3d" && artData.modelUrl) {
+              setModelViewerData({
+                modelUrl: artData.modelUrl,
+                data: { ...artData },
+              });
+            } else {
+              setOverlayData({ ...artData });
+            }
+            return;
+          }
         }
+        canvasRef.current.requestPointerLock();
       };
       canvasRef.current.addEventListener("click", onCanvasClick);
       cleanupFns.push(() =>
@@ -443,7 +532,13 @@ export default function Viewer() {
       /* ── Keyboard ── */
       const keys = { w: false, a: false, s: false, d: false };
       const onKeyDown = (e) => {
-        if ((overlayOpenRef.current || modelViewerOpenRef.current) && e.code !== "Escape") return;
+        if (
+          (overlayOpenRef.current ||
+            modelViewerOpenRef.current ||
+            shopkeeperChatOpenRef.current) &&
+          e.code !== "Escape"
+        )
+          return;
         switch (e.code) {
           case "KeyW":
             keys.w = true;
@@ -458,17 +553,25 @@ export default function Viewer() {
             keys.d = true;
             break;
           case "KeyE":
-            if (hoveredSlotRef.current?.userData?.artData) {
-              const artData = hoveredSlotRef.current.userData.artData;
-              if (artData.slotType === "model3d" && artData.modelUrl) {
-                // Open 3D product viewer
-                setModelViewerData({
-                  modelUrl: artData.modelUrl,
-                  data: { ...artData },
-                });
-              } else {
-                // Open art overlay
-                setOverlayData({ ...artData });
+            if (hoveredSlotRef.current) {
+              const obj = hoveredSlotRef.current;
+              if (obj.userData.isShopkeeper) {
+                console.log("⌨️ E key on Shopkeeper → opening chat");
+                // FIX: set ref immediately — don't wait for useEffect
+                shopkeeperChatOpenRef.current = true;
+                setShopkeeperNearby(true);
+                setShopkeeperDismissed(false);
+                shopkeeperDismissedRef.current = false;
+              } else if (obj.userData.artData) {
+                const artData = obj.userData.artData;
+                if (artData.slotType === "model3d" && artData.modelUrl) {
+                  setModelViewerData({
+                    modelUrl: artData.modelUrl,
+                    data: { ...artData },
+                  });
+                } else {
+                  setOverlayData({ ...artData });
+                }
               }
             }
             break;
@@ -560,7 +663,11 @@ export default function Viewer() {
         if (!renderer.xr.isPresenting) {
           updateCrosshair();
 
-          if (!overlayOpenRef.current && !modelViewerOpenRef.current) {
+          if (
+            !overlayOpenRef.current &&
+            !modelViewerOpenRef.current &&
+            !shopkeeperChatOpenRef.current
+          ) {
             direction.z = Number(keys.s) - Number(keys.w);
             direction.x = Number(keys.d) - Number(keys.a);
             direction.normalize();
@@ -597,17 +704,16 @@ export default function Viewer() {
           }
         }
 
-        // Rotate product models slowly
+        // Rotate product models
         Object.values(productSlots).forEach((mesh) => {
           if (mesh.userData.rotationGroup) {
             mesh.userData.rotationGroup.rotation.y += delta * 0.3;
           }
         });
 
-        /* ── Live Visitor Presence Loop ── */
-        if (socketRef.current && socketRef.current.connected) {
+        /* ── Live visitor presence ── */
+        if (socketRef.current?.connected) {
           const now = Date.now();
-          // Broadcast local position at 10Hz to save bandwidth
           if (now - lastBroadcastRef.current > 100) {
             socketRef.current.emit("position-update", {
               position: {
@@ -621,21 +727,15 @@ export default function Viewer() {
             setPlayerPos({ x: playerRig.position.x, z: playerRig.position.z });
           }
 
-          // Lerp other visitors and enforce culling
           const visitorsArr = Array.from(otherVisitorsMap.current.values());
-
-          // Sort by distance (closest first)
-          visitorsArr.sort((a, b) => {
-            const distA = playerRig.position.distanceToSquared(a.targetPos);
-            const distB = playerRig.position.distanceToSquared(b.targetPos);
-            return distA - distB;
-          });
-
+          visitorsArr.sort(
+            (a, b) =>
+              playerRig.position.distanceToSquared(a.targetPos) -
+              playerRig.position.distanceToSquared(b.targetPos),
+          );
           visitorsArr.forEach((v, idx) => {
-            // Cull: Only show nearest 20 visitors and respect toggle
             if (idx < 20 && showVisitorsRef.current) {
               if (!v.mesh.parent) scene.add(v.mesh);
-              // Smoothly interpolate position for 10hz updates -> 60fps render
               v.mesh.position.lerp(v.targetPos, 0.15);
             } else {
               if (v.mesh.parent) v.mesh.parent.remove(v.mesh);
@@ -660,13 +760,17 @@ export default function Viewer() {
 
     init();
 
-    /* ── Socket.io Connection & Events ── */
-    // Use VITE_API_URL or fallback to localhost:5000 in dev
+    /* ── Socket.io ── */
     const SOCKET_URL = import.meta.env.VITE_API_URL
       ? import.meta.env.VITE_API_URL.replace("/api", "")
-      : "http://localhost:5000";
+      : undefined; // undefined makes socket.io connect to the current host (relies on Vite proxy during dev)
 
-    const socket = io(SOCKET_URL, { withCredentials: true });
+    const socket = io(SOCKET_URL, {
+      withCredentials: true,
+      extraHeaders: {
+        "ngrok-skip-browser-warning": "true",
+      },
+    });
     socketRef.current = socket;
 
     socket.on("connect", () => {
@@ -677,25 +781,19 @@ export default function Viewer() {
       });
     });
 
-    socket.on("visitor-count", (count) => {
-      setVisitorCount(count);
-    });
-
+    socket.on("visitor-count", (count) => setVisitorCount(count));
     socket.on("current-visitors", (currentVisitors) => {
-      currentVisitors.forEach((v) => addVisitor(v));
+      currentVisitors.forEach(addVisitor);
       updateVisitorsState();
     });
-
     socket.on("visitor-joined", (visitor) => {
       addVisitor(visitor);
       updateVisitorsState();
     });
-
     socket.on("visitor-left", ({ socketId }) => {
       removeVisitor(socketId);
       updateVisitorsState();
     });
-
     socket.on("visitor-moved", ({ socketId, position, rotation }) => {
       const v = otherVisitorsMap.current.get(socketId);
       if (v) {
@@ -706,17 +804,12 @@ export default function Viewer() {
 
     function addVisitor(v) {
       if (otherVisitorsMap.current.has(v.socketId)) return;
-      
       const vcol = visitorColor(v.userId || v.socketId);
       const mesh = createVisitorDot(vcol);
       const label = createVisitorLabel(v.name, vcol);
-      
       mesh.position.copy(v.position);
-      // Place label about 1.8m high relative to dot
-      label.position.set(0, 1.8, 0); 
+      label.position.set(0, 1.8, 0);
       mesh.add(label);
-      
-      // Store in map but don't add to scene yet (will be managed by distance sorting in render loop)
       otherVisitorsMap.current.set(v.socketId, {
         ...v,
         mesh,
@@ -735,12 +828,13 @@ export default function Viewer() {
     }
 
     function updateVisitorsState() {
-      // Create a plain array for the React minimap state
-      setVisitors(Array.from(otherVisitorsMap.current.values()).map(v => ({
-        socketId: v.socketId,
-        name: v.name,
-        position: v.targetPos,
-      })));
+      setVisitors(
+        Array.from(otherVisitorsMap.current.values()).map((v) => ({
+          socketId: v.socketId,
+          name: v.name,
+          position: v.targetPos,
+        })),
+      );
     }
 
     return () => {
@@ -748,9 +842,7 @@ export default function Viewer() {
         renderer.setAnimationLoop(null);
         renderer.dispose();
       }
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-      }
+      if (socketRef.current) socketRef.current.disconnect();
       document.exitPointerLock();
       cleanupFns.forEach((fn) => fn());
     };
@@ -764,18 +856,15 @@ export default function Viewer() {
       const { data } = await api.post(
         `/exhibitions/${id}/slots/${currentData.slotName}/like`,
       );
-      if (overlayData) {
+      if (overlayData)
         setOverlayData((prev) => ({ ...prev, likes: data.likes }));
-      }
-      if (modelViewerData) {
+      if (modelViewerData)
         setModelViewerData((prev) => ({
           ...prev,
           data: { ...prev.data, likes: data.likes },
         }));
-      }
-      if (hoveredSlotRef.current?.userData?.artData) {
+      if (hoveredSlotRef.current?.userData?.artData)
         hoveredSlotRef.current.userData.artData.likes = data.likes;
-      }
     } catch (err) {
       console.error("Like failed:", err);
     } finally {
@@ -791,7 +880,6 @@ export default function Viewer() {
       artist: currentData.artist || "",
       price: currentData.price || 0,
     });
-    // Pass the image URL for checkout page display
     if (currentData.imageUrl) params.set("image", currentData.imageUrl);
     navigate(`/checkout?${params.toString()}`);
   }, [overlayData, modelViewerData, navigate]);
@@ -950,7 +1038,7 @@ export default function Viewer() {
           backdropFilter: "blur(12px)",
           border: "1px solid rgba(196,162,101,0.3)",
           padding: "1.2rem 1.5rem",
-          opacity: (overlayData || modelViewerData) ? 0 : 1,
+          opacity: overlayData || modelViewerData ? 0 : 1,
           transition: "opacity 0.3s",
           pointerEvents: "none",
         }}
@@ -970,7 +1058,7 @@ export default function Viewer() {
         {[
           ["W A S D", "Move"],
           ["Mouse", "Look"],
-          ["E", "Inspect art"],
+          ["E", "Interact"],
           ["Esc", "Close"],
         ].map(([key, label]) => (
           <div
@@ -1021,6 +1109,7 @@ export default function Viewer() {
         </div>
       </div>
 
+      {/* Art overlay */}
       {overlayData && (
         <ArtOverlay
           data={overlayData}
@@ -1031,6 +1120,7 @@ export default function Viewer() {
         />
       )}
 
+      {/* 3D model viewer */}
       {modelViewerData && (
         <Model3DViewer
           modelUrl={modelViewerData.modelUrl}
@@ -1043,7 +1133,19 @@ export default function Viewer() {
         />
       )}
 
-      {/* Live Visitors Minimap */}
+      {/* ── FIX: ShopkeeperChat is here in Viewer, NOT inside ArtOverlay ── */}
+      <ShopkeeperChat
+        exhibitionId={id}
+        visible={shopkeeperNearby && !shopkeeperDismissed}
+        onClose={() => {
+          shopkeeperChatOpenRef.current = false;
+          setShopkeeperNearby(false);
+          setShopkeeperDismissed(true);
+          shopkeeperDismissedRef.current = true;
+        }}
+      />
+
+      {/* Minimap */}
       <Minimap
         visitors={visitors}
         playerPos={playerPos}
@@ -1056,10 +1158,17 @@ export default function Viewer() {
           });
         }}
       />
+
+      <style>{`
+        @keyframes fadeIn  { from { opacity:0 } to { opacity:1 } }
+        @keyframes panelIn { from { opacity:0; transform:translateY(24px) scale(0.97) } to { opacity:1; transform:translateY(0) scale(1) } }
+        #vr-crosshair.on-art .ch-ring { transform:translate(-50%,-50%) scale(1.5) !important; border-color:#c4a265 !important; }
+      `}</style>
     </div>
   );
 }
 
+/* ── Art Overlay ── */
 function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
   return (
     <div
@@ -1413,12 +1522,6 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
           </div>
         </div>
       </div>
-
-      <style>{`
-        @keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
-        @keyframes panelIn { from { opacity:0; transform:translateY(24px) scale(0.97) } to { opacity:1; transform:translateY(0) scale(1) } }
-        #vr-crosshair.on-art .ch-ring { transform:translate(-50%,-50%) scale(1.5) !important; border-color:#c4a265 !important; }
-      `}</style>
     </div>
   );
 }

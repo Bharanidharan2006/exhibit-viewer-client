@@ -18,6 +18,7 @@ export default function CreateExhibition() {
   const [slots, setSlots] = useState([]);
   const [uploading, setUploading] = useState({});
   const [error, setError] = useState("");
+  const [aiShopkeeper, setAiShopkeeper] = useState({ enabled: false, exhibitionStory: "" });
 
   // ── Edit mode: load existing exhibition ──
   useEffect(() => {
@@ -28,6 +29,7 @@ export default function CreateExhibition() {
         setExhibition(data);
         setSlots(data.slots);
         setBasicInfo({ name: data.name, description: data.description || "" });
+        setAiShopkeeper(data.aiShopkeeper || { enabled: false, exhibitionStory: "" });
         setStep(1); // go straight to Fill Slots
       } catch {
         setError("Failed to load exhibition for editing");
@@ -49,6 +51,7 @@ export default function CreateExhibition() {
         modelTemplate: selectedTemplate.id,
         slotCount: selectedTemplate.slotCount,
         productSlotCount: selectedTemplate.productSlotCount || 0,
+        aiShopkeeper,
       });
       setExhibition(data);
       setSlots(data.slots);
@@ -198,6 +201,92 @@ export default function CreateExhibition() {
                   }
                 />
               </div>
+            </div>
+
+            {/* AI Shopkeeper toggle */}
+            <div className="section-label" style={{ marginTop: "1rem" }}>AI Gallery Assistant</div>
+            <div
+              style={{
+                padding: "1.5rem",
+                border: "1px solid var(--border)",
+                background: "rgba(255,255,255,0.4)",
+                marginBottom: "3rem",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: aiShopkeeper.enabled ? "1.2rem" : 0 }}>
+                <button
+                  type="button"
+                  onClick={() => setAiShopkeeper((prev) => ({ ...prev, enabled: !prev.enabled }))}
+                  style={{
+                    width: 48,
+                    height: 26,
+                    borderRadius: 13,
+                    border: "none",
+                    background: aiShopkeeper.enabled ? "var(--gold)" : "var(--border-sub)",
+                    cursor: "pointer",
+                    position: "relative",
+                    transition: "background 0.2s",
+                    flexShrink: 0,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: 3,
+                      left: aiShopkeeper.enabled ? 25 : 3,
+                      transition: "left 0.2s",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                    }}
+                  />
+                </button>
+                <div>
+                  <div style={{ fontWeight: 500, fontSize: "1rem" }}>
+                    Enable AI Shopkeeper
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: "0.72rem",
+                      color: "var(--muted)",
+                      letterSpacing: "0.05em",
+                      marginTop: "0.2rem",
+                    }}
+                  >
+                    A virtual assistant visitors can talk to about your exhibition
+                  </div>
+                </div>
+              </div>
+
+              {aiShopkeeper.enabled && (
+                <div className="field">
+                  <label>Exhibition Story / Context for the AI</label>
+                  <textarea
+                    placeholder="Describe your exhibition in detail — its theme, inspiration, story behind the collection. The AI will use this to answer visitor questions."
+                    value={aiShopkeeper.exhibitionStory}
+                    onChange={(e) =>
+                      setAiShopkeeper((prev) => ({ ...prev, exhibitionStory: e.target.value }))
+                    }
+                    style={{
+                      width: "100%",
+                      minHeight: 100,
+                      border: "none",
+                      borderBottom: "1px solid var(--border-sub)",
+                      background: "transparent",
+                      padding: "0.6rem 0",
+                      fontSize: "1rem",
+                      fontWeight: 300,
+                      color: "var(--ink)",
+                      outline: "none",
+                      fontFamily: "'Cormorant Garamond', serif",
+                      resize: "vertical",
+                    }}
+                  />
+                </div>
+              )}
             </div>
 
             <div className="section-label">02 — Choose a Gallery Layout</div>

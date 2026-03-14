@@ -31,7 +31,18 @@ const GALLERY_TEMPLATES = [
     price: 999,
     flipY: false,
   },
+  {
+    id: "gallery_v3",
+    name: "Axes of Perception",
+    description:
+      "A modern digital gallery that explores spatial orientation through artworks themed around horizontal and vertical perspectives, guiding visitors through a structured visual experience of balance and direction.",
+    glbFile: "/models/gallery3.glb", // served from client/public/models/
+    previewImage: "/models/gallery3-preview.png", // add a screenshot of the model here
+    slotCount: 14,
+    productSlotCount: 0,
+    price: 1999,
+    flipY: true,
+  },
 ];
 
 export default GALLERY_TEMPLATES;
-
