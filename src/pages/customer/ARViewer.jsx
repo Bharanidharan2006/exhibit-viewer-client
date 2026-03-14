@@ -190,8 +190,12 @@ export default function ARViewer() {
       scene.add(reticle);
 
       /* ── 4. Load model ── */
+      // No Group wrapper — model placed directly for cleaner transforms.
+      // Offsets computed at load time, applied at placement time.
       let readyModel = null;
       let modelPlaced = false;
+      let offsetX = 0, offsetY = 0, offsetZ = 0;
+      let pivotPoint = new THREE.Vector3(); // for touch rotation
 
       const loader = new GLTFLoader();
       loader.load(
@@ -199,44 +203,105 @@ export default function ARViewer() {
         (gltf) => {
           const m = gltf.scene;
 
-          // Scale so largest axis = 1 m (visible in AR)
+          // Only scale DOWN if model exceeds 1 m.
+          // Smaller models keep their exact Blender dimensions.
           const box = new THREE.Box3().setFromObject(m);
           const sz = box.getSize(new THREE.Vector3());
           const maxDim = Math.max(sz.x, sz.y, sz.z);
-          if (maxDim > 0) m.scale.multiplyScalar(1.0 / maxDim);
+          if (maxDim > 1.0) m.scale.multiplyScalar(1.0 / maxDim);
 
-          // Bot­tom at y=0, centered on x/z
+          // Compute centering offsets (applied during placement)
           const sb = new THREE.Box3().setFromObject(m);
           const c = sb.getCenter(new THREE.Vector3());
-          m.position.set(-c.x, -sb.min.y, -c.z);
+          offsetX = -c.x;       // center on X
+          offsetY = -sb.min.y;  // lift bottom to y=0
+          offsetZ = -c.z;       // center on Z
 
-          // Wrap in a group so "group.position = surface" works
-          const grp = new THREE.Group();
-          grp.add(m);
-          readyModel = grp;
+          readyModel = m;
         },
         undefined,
         (e) => console.error("Model load failed:", e),
       );
 
-      /* ── 5. Controller (official pattern for tap-to-place) ── */
+      /* ── 5. Touch-to-rotate (after placement) ── */
+      // Horizontal swipe rotates the model around its Y axis.
+      // Since matrixAutoUpdate is frozen, we manually update
+      // the matrix only when the user actively rotates.
+      let touchStartX = 0;
+      let currentRotY = 0;
+
+      const onTouchStart = (e) => {
+        if (!modelPlaced || !readyModel) return;
+        touchStartX = e.touches[0].clientX;
+      };
+
+      const onTouchMove = (e) => {
+        if (!modelPlaced || !readyModel) return;
+        const dx = e.touches[0].clientX - touchStartX;
+        touchStartX = e.touches[0].clientX;
+
+        // Convert pixel delta to rotation (180° per screen width)
+        const rotDelta = (dx / window.innerWidth) * Math.PI;
+        currentRotY += rotDelta;
+
+        // Rotate around the pivot (surface placement point)
+        // 1. Translate to pivot
+        // 2. Apply rotation
+        // 3. Translate back
+        const pos = readyModel.position.clone();
+        const relX = pos.x - pivotPoint.x;
+        const relZ = pos.z - pivotPoint.z;
+        const cosA = Math.cos(rotDelta);
+        const sinA = Math.sin(rotDelta);
+        readyModel.position.x = pivotPoint.x + relX * cosA - relZ * sinA;
+        readyModel.position.z = pivotPoint.z + relX * sinA + relZ * cosA;
+        readyModel.rotation.y = currentRotY;
+
+        // Manually recompute matrices (frozen, so must be explicit)
+        readyModel.updateMatrix();
+        readyModel.updateMatrixWorld(true);
+      };
+
+      document.addEventListener("touchstart", onTouchStart, { passive: true });
+      document.addEventListener("touchmove", onTouchMove, { passive: true });
+
+      /* ── 6. Controller (official pattern for tap-to-place) ── */
       const controller = renderer.xr.getController(0);
       controller.addEventListener("select", () => {
         if (modelPlaced || !readyModel) return;
 
+        // Get the surface world-position
+        const surface = new THREE.Vector3();
         if (reticle.visible) {
-          // Place at exact reticle world position
-          readyModel.position.setFromMatrixPosition(reticle.matrix);
+          surface.setFromMatrixPosition(reticle.matrix);
         } else {
           // Fallback: 1.5 m in front of XR camera
           const xrCam = renderer.xr.getCamera();
           const fwd = new THREE.Vector3(0, 0, -1.5);
           fwd.applyQuaternion(xrCam.quaternion);
-          readyModel.position.copy(xrCam.position).add(fwd);
-          readyModel.position.y -= 0.5;
+          surface.copy(xrCam.position).add(fwd);
+          surface.y -= 0.5;
         }
 
+        // Store the surface point as pivot for rotation
+        pivotPoint.copy(surface);
+
+        // Place model: centered on surface X/Z, hovering ~3cm above surface
+        readyModel.position.set(
+          surface.x + offsetX,
+          surface.y + offsetY + 0.03,
+          surface.z + offsetZ,
+        );
+
         scene.add(readyModel);
+
+        // Freeze transforms — only touch rotation will update them
+        readyModel.updateMatrixWorld(true);
+        readyModel.matrixAutoUpdate = false;
+        readyModel.traverse((child) => {
+          child.matrixAutoUpdate = false;
+        });
+
         modelPlaced = true;
         reticle.visible = false;
         setPlaced(true);
@@ -313,6 +378,8 @@ export default function ARViewer() {
       session.addEventListener("end", () => {
         renderer.setAnimationLoop(null);
         renderer.dispose();
+        document.removeEventListener("touchstart", onTouchStart);
+        document.removeEventListener("touchmove", onTouchMove);
         if (arCanvasRef.current) {
           arCanvasRef.current.remove();
           arCanvasRef.current = null;
@@ -427,10 +494,10 @@ export default function ARViewer() {
                 </div>
               )}
               <button
-                onClick={() => navigate(`/checkout?title=${encodeURIComponent(product.title || "")}&artist=${encodeURIComponent(product.artist || "")}&price=${product.price || 0}`)}
+                onClick={() => navigate(`/checkout?title=${encodeURIComponent(product.title || "")}&artist=${encodeURIComponent(product.artist || "")}&price=${product.price || 0}${product.imageUrl ? `&image=${encodeURIComponent(product.imageUrl)}` : ""}`)}
                 style={S.buyBtn}
               >
-                Acquire →
+                Buy Now →
               </button>
             </div>
 
@@ -445,7 +512,7 @@ export default function ARViewer() {
       {arActive && (
         <div style={{ position: "fixed", bottom: "2rem", left: 0, right: 0, textAlign: "center", zIndex: 1100, pointerEvents: "none" }}>
           <div style={{ display: "inline-block", background: "rgba(0,0,0,.65)", backdropFilter: "blur(8px)", color: placed ? "#c4a265" : "#fff", ...S.mono, fontSize: ".6rem", letterSpacing: ".1em", padding: ".6rem 1.2rem", borderRadius: "2rem", border: "1px solid rgba(196,162,101,.3)" }}>
-            {placed ? "✓ Product placed — walk around to view" : "Point at a surface, then tap to place"}
+            {placed ? "✓ Placed — swipe to rotate" : "Point at a surface, then tap to place"}
           </div>
         </div>
       )}

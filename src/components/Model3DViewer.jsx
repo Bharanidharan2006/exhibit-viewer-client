@@ -463,7 +463,7 @@ export default function Model3DViewer({ modelUrl, data, exhibitionId, onClose, o
                 padding: "0.5rem 0.9rem",
                 cursor: "pointer",
                 fontFamily: "'DM Mono', monospace",
-                fontSize: "0.65rem",
+                fontSize: "0.8rem",
                 letterSpacing: "0.1em",
                 color: "#8a7f72",
                 opacity: liking ? 0.6 : 1,
@@ -500,7 +500,7 @@ export default function Model3DViewer({ modelUrl, data, exhibitionId, onClose, o
                 transition: "background 0.3s",
               }}
             >
-              Acquire →
+              Buy Now →
             </button>
             <button
               onClick={onClose}
@@ -532,7 +532,7 @@ export default function Model3DViewer({ modelUrl, data, exhibitionId, onClose, o
                 border: "1px solid rgba(196,162,101,0.25)",
                 padding: "0.75rem 1rem",
                 fontFamily: "'DM Mono', monospace",
-                fontSize: "0.6rem",
+                fontSize: "0.75rem",
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
                 color: "#c4a265",
@@ -555,7 +555,7 @@ export default function Model3DViewer({ modelUrl, data, exhibitionId, onClose, o
             style={{
               textAlign: "center",
               fontFamily: "'DM Mono', monospace",
-              fontSize: "0.55rem",
+              fontSize: "0.72rem",
               letterSpacing: "0.1em",
               color: "#8a7f72",
               opacity: 0.65,
@@ -639,7 +639,7 @@ function QRModal({ exhibitionId, slotName, productTitle, onClose }) {
         <div
           style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.55rem",
+            fontSize: "0.75rem",
             letterSpacing: "0.25em",
             textTransform: "uppercase",
             color: "#c4a265",
@@ -683,7 +683,7 @@ function QRModal({ exhibitionId, slotName, productTitle, onClose }) {
         <div
           style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.55rem",
+            fontSize: "0.75rem",
             letterSpacing: "0.1em",
             color: "#8a7f72",
             lineHeight: 1.7,
@@ -699,7 +699,7 @@ function QRModal({ exhibitionId, slotName, productTitle, onClose }) {
         <div
           style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.45rem",
+            fontSize: "0.6rem",
             letterSpacing: "0.05em",
             color: "rgba(26,21,16,0.35)",
             wordBreak: "break-all",
@@ -722,13 +722,39 @@ function QRModal({ exhibitionId, slotName, productTitle, onClose }) {
             color: "#f5f0e8",
             border: "none",
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.6rem",
+            fontSize: "0.75rem",
             letterSpacing: "0.15em",
             textTransform: "uppercase",
             cursor: "pointer",
           }}
         >
           Close
+        </button>
+
+        {/* Copy Link */}
+        <button
+          onClick={() => {
+            navigator.clipboard.writeText(arUrl).then(() => {
+              const btn = document.getElementById('qr-copy-btn');
+              if (btn) { btn.textContent = '✓ COPIED!'; setTimeout(() => btn.textContent = 'COPY LINK', 1500); }
+            });
+          }}
+          id="qr-copy-btn"
+          style={{
+            width: "100%",
+            padding: "0.75rem",
+            marginTop: "0.5rem",
+            background: "transparent",
+            color: "#c4a265",
+            border: "1px solid rgba(196,162,101,0.3)",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "0.75rem",
+            letterSpacing: "0.15em",
+            textTransform: "uppercase",
+            cursor: "pointer",
+          }}
+        >
+          Copy Link
         </button>
       </div>
     </div>

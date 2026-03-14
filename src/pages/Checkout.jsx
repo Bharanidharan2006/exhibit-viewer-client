@@ -29,9 +29,10 @@ export default function Checkout() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
 
-  const title = params.get("title") || "Artwork";
-  const artist = params.get("artist") || "Artist";
+  const title = params.get("title") || "Product";
+  const artist = params.get("artist") || "Creator";
   const price = Number(params.get("price") || 4200);
+  const image = params.get("image") || null;
   const shipping = 120,
     auth = 80;
   const total = price + shipping + auth;
@@ -117,12 +118,12 @@ export default function Checkout() {
             marginBottom: "1rem",
           }}
         >
-          Your piece awaits.
+          Your order is confirmed.
         </h1>
         <p
           style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.7rem",
+            fontSize: "0.8rem",
             letterSpacing: "0.2em",
             color: "#8a7f72",
             lineHeight: 1.8,
@@ -131,16 +132,16 @@ export default function Checkout() {
         >
           CONFIRMATION SENT TO YOUR EMAIL
           <br />
-          Your acquisition of <em>{title}</em> is secured.
+          Your purchase of <em>{title}</em> is secured.
           <br />
-          Expect a call from our curator within 24 hours.
+          Expect confirmation within 24 hours.
         </p>
         <button
           onClick={() => navigate("/exhibitions")}
           style={{
             marginTop: "2.5rem",
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.65rem",
+            fontSize: "0.8rem",
             letterSpacing: "0.15em",
             textTransform: "uppercase",
             padding: "0.8rem 2rem",
@@ -322,7 +323,7 @@ export default function Checkout() {
                 marginBottom: "1.5rem",
               }}
             >
-              Secure your acquisition
+              Secure your purchase
             </h2>
             <div
               style={{ display: "flex", gap: "0.5rem", marginBottom: "1.5rem" }}
@@ -332,7 +333,7 @@ export default function Checkout() {
                   key={c}
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.55rem",
+                    fontSize: "0.72rem",
                     letterSpacing: "0.1em",
                     border: "1px solid rgba(26,21,16,0.1)",
                     padding: "0.2rem 0.5rem",
@@ -399,7 +400,7 @@ export default function Checkout() {
                 gap: "0.75rem",
                 marginTop: "2rem",
                 fontFamily: "'DM Mono', monospace",
-                fontSize: "0.6rem",
+                fontSize: "0.75rem",
                 letterSpacing: "0.1em",
                 color: "#8a7f72",
               }}
@@ -429,7 +430,7 @@ export default function Checkout() {
                 (e.currentTarget.style.background = "#1a1510")
               }
             >
-              Complete Acquisition →
+              Complete Purchase →
             </button>
           </div>
 
@@ -445,23 +446,40 @@ export default function Checkout() {
           >
             <div className="section-label">Your Selection</div>
 
+            {/* Product image — actual image or gradient fallback */}
             <div
               style={{
                 width: "100%",
                 aspectRatio: "4/3",
-                background:
-                  "linear-gradient(135deg,#1a0e06,#6b3a1f,#c4743a,#e8a862,#1a3a2a)",
+                background: image
+                  ? "#0a0805"
+                  : "linear-gradient(135deg,#1a0e06,#6b3a1f,#c4743a,#e8a862,#1a3a2a)",
                 marginBottom: "1.5rem",
                 position: "relative",
+                overflow: "hidden",
               }}
             >
+              {image && (
+                <img
+                  src={image}
+                  alt={title}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "contain",
+                  }}
+                  onError={(e) => {
+                    e.target.style.display = "none";
+                  }}
+                />
+              )}
               <div
                 style={{
                   position: "absolute",
                   top: "1rem",
                   left: "1rem",
                   fontFamily: "'DM Mono', monospace",
-                  fontSize: "0.6rem",
+                  fontSize: "0.72rem",
                   letterSpacing: "0.2em",
                   textTransform: "uppercase",
                   background: "rgba(0,0,0,0.7)",
@@ -470,14 +488,14 @@ export default function Checkout() {
                   backdropFilter: "blur(8px)",
                 }}
               >
-                Original Work
+                Selected Item
               </div>
             </div>
 
             <div
               style={{
                 fontFamily: "'DM Mono', monospace",
-                fontSize: "0.65rem",
+                fontSize: "0.8rem",
                 letterSpacing: "0.2em",
                 color: "#8a7f72",
                 marginBottom: "0.4rem",
@@ -505,7 +523,7 @@ export default function Checkout() {
             />
 
             {[
-              ["Artwork Price", `₹${price.toLocaleString("en-IN")}`],
+              ["Item Price", `₹${price.toLocaleString("en-IN")}`],
               ["Insured Shipping", `₹${shipping.toLocaleString("en-IN")}`],
               ["Authentication", `₹${auth.toLocaleString("en-IN")}`],
             ].map(([label, val]) => (
@@ -520,7 +538,7 @@ export default function Checkout() {
                 <span
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.65rem",
+                    fontSize: "0.8rem",
                     letterSpacing: "0.15em",
                     color: "#8a7f72",
                     textTransform: "uppercase",
@@ -543,7 +561,7 @@ export default function Checkout() {
                 <span
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.65rem",
+                    fontSize: "0.8rem",
                     color: "#4a8c5c",
                   }}
                 >
@@ -574,7 +592,7 @@ export default function Checkout() {
               style={{ display: "flex", gap: "0.75rem", margin: "1.5rem 0" }}
             >
               <input
-                placeholder="Collector code"
+                placeholder="Discount code"
                 value={coupon}
                 onChange={(e) => setCoupon(e.target.value)}
                 style={{
@@ -605,7 +623,7 @@ export default function Checkout() {
               <span
                 style={{
                   fontFamily: "'DM Mono', monospace",
-                  fontSize: "0.7rem",
+                  fontSize: "0.8rem",
                   letterSpacing: "0.15em",
                   textTransform: "uppercase",
                 }}
@@ -628,7 +646,7 @@ export default function Checkout() {
               <div
                 style={{
                   fontFamily: "'DM Mono', monospace",
-                  fontSize: "0.62rem",
+                  fontSize: "0.75rem",
                   lineHeight: 2.1,
                   color: "#8a7f72",
                 }}
@@ -637,8 +655,8 @@ export default function Checkout() {
                 <br />
                 ✦ &nbsp;Certificate of Authenticity included
                 <br />
-                ✦ &nbsp;Museum-grade packaging
-                <br />✦ &nbsp;Artist directly compensated
+                ✦ &nbsp;Premium packaging
+                <br />✦ &nbsp;Creator directly compensated
               </div>
             </div>
           </div>

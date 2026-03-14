@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import Navbar from "../../components/Navbar.jsx";
 import api from "../../api.js";
 import GALLERY_TEMPLATES from "../../galleryTemplates.js";
@@ -8,13 +8,32 @@ const STEPS = ["Choose Layout", "Fill Slots", "Publish"];
 
 export default function CreateExhibition() {
   const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const editId = params.get("edit");
+
   const [step, setStep] = useState(0);
   const [selectedTemplate, setTemplate] = useState(null);
-  const [exhibition, setExhibition] = useState(null); // created in DB after step 0
+  const [exhibition, setExhibition] = useState(null);
   const [basicInfo, setBasicInfo] = useState({ name: "", description: "" });
-  const [slots, setSlots] = useState([]); // mirrors exhibition.slots
-  const [uploading, setUploading] = useState({}); // { slotName: true/false }
+  const [slots, setSlots] = useState([]);
+  const [uploading, setUploading] = useState({});
   const [error, setError] = useState("");
+
+  // ── Edit mode: load existing exhibition ──
+  useEffect(() => {
+    if (!editId) return;
+    (async () => {
+      try {
+        const { data } = await api.get(`/exhibitions/${editId}`);
+        setExhibition(data);
+        setSlots(data.slots);
+        setBasicInfo({ name: data.name, description: data.description || "" });
+        setStep(1); // go straight to Fill Slots
+      } catch {
+        setError("Failed to load exhibition for editing");
+      }
+    })();
+  }, [editId]);
 
   /* ── Step 0: choose template + fill basic info ── */
   const handleChooseTemplate = async (e) => {
@@ -106,7 +125,7 @@ export default function CreateExhibition() {
                     display: "grid",
                     placeItems: "center",
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.6rem",
+                    fontSize: "0.75rem",
                     color:
                       i < step
                         ? "white"
@@ -120,7 +139,7 @@ export default function CreateExhibition() {
                 <span
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.62rem",
+                    fontSize: "0.75rem",
                     letterSpacing: "0.15em",
                     textTransform: "uppercase",
                     color: i === step ? "var(--ink)" : "var(--muted)",
@@ -300,7 +319,7 @@ export default function CreateExhibition() {
               <div
                 style={{
                   fontFamily: "'DM Mono', monospace",
-                  fontSize: "0.6rem",
+                  fontSize: "0.75rem",
                   letterSpacing: "0.15em",
                   lineHeight: 2.2,
                   color: "var(--muted)",
@@ -309,10 +328,10 @@ export default function CreateExhibition() {
                 ✦ &nbsp;Your exhibition will be immediately visible to all
                 visitors
                 <br />
-                ✦ &nbsp;You can unpublish or update artwork anytime from the
+                ✦ &nbsp;You can unpublish or update items anytime from the
                 dashboard
                 <br />✦ &nbsp;Visitors can browse, like, and purchase your
-                listed artworks
+                listed items
               </div>
             </div>
 
@@ -420,7 +439,7 @@ function TemplateCard({ template, selected, onSelect }) {
         <span
           style={{
             fontFamily: "'DM Mono', monospace",
-            fontSize: "0.62rem",
+            fontSize: "0.75rem",
             color: "var(--muted)",
           }}
         >
@@ -520,7 +539,7 @@ function SlotEditor({ slot, onSave, loading }) {
                 <div
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.5rem",
+                    fontSize: "0.65rem",
                     color: "var(--gold-deep)",
                     letterSpacing: "0.1em",
                     wordBreak: "break-all",
@@ -543,7 +562,7 @@ function SlotEditor({ slot, onSave, loading }) {
                 <div
                   style={{
                     fontFamily: "'DM Mono', monospace",
-                    fontSize: "0.55rem",
+                    fontSize: "0.72rem",
                     color: "var(--muted)",
                     letterSpacing: "0.1em",
                   }}
@@ -598,7 +617,7 @@ function SlotEditor({ slot, onSave, loading }) {
           <div
             style={{
               fontFamily: "'DM Mono', monospace",
-              fontSize: "0.6rem",
+              fontSize: "0.75rem",
               letterSpacing: "0.2em",
               color: "var(--gold)",
               marginBottom: "1rem",

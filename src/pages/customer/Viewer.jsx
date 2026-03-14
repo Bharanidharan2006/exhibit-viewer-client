@@ -791,6 +791,8 @@ export default function Viewer() {
       artist: currentData.artist || "",
       price: currentData.price || 0,
     });
+    // Pass the image URL for checkout page display
+    if (currentData.imageUrl) params.set("image", currentData.imageUrl);
     navigate(`/checkout?${params.toString()}`);
   }, [overlayData, modelViewerData, navigate]);
 
@@ -1376,7 +1378,7 @@ function ArtOverlay({ data, onClose, onLike, onBuy, liking }) {
                 transition: "background 0.3s",
               }}
             >
-              Acquire This Work →
+              Buy Now →
             </button>
             <button
               onClick={onClose}
